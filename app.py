@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import os
 import yfinance as yf
+import numpy as np
 
 try:
     from data_worker import scan_market
@@ -17,7 +18,7 @@ st.caption("Automated Multi-Cap Screening Engine | Holding Window: Days to Weeks
 # --- SIDEBAR CONTROLS ---
 st.sidebar.subheader("🔄 Cloud Data Controls")
 
-# 1. Existing Broad Scan Button
+# 1. Broad Scan Button
 if st.sidebar.button("🚀 Trigger Live Market Scan"):
     with st.status("🕵️‍♂️ Crawling Indexes & Analyzing Options Chains...", expanded=True) as status:
         try:
@@ -31,22 +32,22 @@ if st.sidebar.button("🚀 Trigger Live Market Scan"):
 
 st.sidebar.markdown("---")
 
-# 2. NEW: Custom Ticker Manual Audit Box
+# 2. Custom Ticker Manual Audit Box
 st.sidebar.subheader("🔍 Instant Single-Ticker Audit")
 custom_symbol = st.sidebar.text_input("Type any stock symbol (e.g., TSLA, PLTR, IWM):").upper().strip()
 
 # --- MAIN DASHBOARD INTERFACE ---
 
-# If the user typed a custom ticker, we process it instantly right here!
+# Single Ticker Instant Look-up Rendering
 if custom_symbol:
     st.subheader(f"⚡ Instant On-Demand Audit for: {custom_symbol}")
-    with st.spinner(f"Fetching real-time options metrics for {custom_symbol}..."):
+    with st.spinner(f"Fetching real-time metrics for {custom_symbol}..."):
         try:
             ticker = yf.Ticker(custom_symbol)
             hist = ticker.history(period="3mo")
             
             if hist.empty or len(hist) < 20:
-                st.error(f"Could not retrieve sufficient trading data for '{custom_symbol}'. Check the symbol spelling.")
+                st.error(f"Could not retrieve sufficient trading data for '{custom_symbol}'.")
             else:
                 current_price = hist['Close'].iloc[-1]
                 hist['20_EMA'] = hist['Close'].ewm(span=20, adjust=False).mean()
@@ -54,7 +55,6 @@ if custom_symbol:
                 is_bullish = current_price > current_ema
                 trend_pct = ((current_price - current_ema) / current_ema) * 100
                 
-                # Default Option Values if data is restricted
                 iv, open_interest, spread_pct = 32.0, 1000, 0.5
                 try:
                     expirations = ticker.options
@@ -70,21 +70,19 @@ if custom_symbol:
                 except:
                     pass
                 
-                # Evaluate Strategy Matrix
                 if is_bullish and iv < 35:
-                    strategy, color, status_type = "🟢 BUY CALLS", "green", "success"
-                    reason = f"Breakout above 20 EMA. Option IV ({iv:.1f}%) is cheap for premium buying."
+                    strategy, status_type = "🟢 BUY CALLS", "success"
+                    reason = f"Breakout above 20 EMA. Option IV ({iv:.1f}%) is cheap."
                 elif not is_bullish and iv < 50:
-                    strategy, color, status_type = "🔴 BUY PUTS", "red", "error"
-                    reason = f"Breakdown below 20 EMA. IV ({iv:.1f}%) has not experienced a panic spike yet."
+                    strategy, status_type = "🔴 BUY PUTS", "error"
+                    reason = f"Breakdown below 20 EMA. IV ({iv:.1f}%) has not spiked yet."
                 elif is_bullish and iv >= 55:
-                    strategy, color, status_type = "🔵 SELL CASH-SECURED PUTS", "blue", "info"
-                    reason = f"Bullish trend framework holding, but elevated IV ({iv:.1f}%) provides rich CSP premium collection support."
+                    strategy, status_type = "🔵 SELL CASH-SECURED PUTS", "info"
+                    reason = f"Bullish trend, but elevated IV ({iv:.1f}%) favors premium sellers."
                 else:
-                    strategy, color, status_type = "🟡 STAY IN CASH", "orange", "warning"
-                    reason = f"Asset sitting inside volatility chop zone ({iv:.1f}% IV). Insufficient directional edge."
+                    strategy, status_type = "🟡 STAY IN CASH", "warning"
+                    reason = f"Asset sitting inside volatility chop zone ({iv:.1f}% IV)."
                 
-                # Display Results in a Clean Box
                 if status_type == "success": st.success(f"### Strategy Signal: {strategy}")
                 elif status_type == "error": st.error(f"### Strategy Signal: {strategy}")
                 elif status_type == "info": st.info(f"### Strategy Signal: {strategy}")
@@ -95,13 +93,12 @@ if custom_symbol:
                 col2.metric("Distance from 20-EMA", f"{trend_pct:+.1f}%")
                 col3.metric("ATM Contract IV", f"{iv:.1f}%")
                 col4.metric("Open Interest Depth", f"{open_interest}")
-                
-                st.markdown(f"**Automated Analysis Breakdown:** {reason}")
+                st.markdown(f"**Analysis:** {reason}")
                 st.markdown("---")
         except Exception as err:
             st.error(f"Failed to scan {custom_symbol}: {err}")
 
-# --- REST OF THE CODE (Displays the background index data tables as usual) ---
+# Baseline Global Data Matrix Processing
 if not os.path.exists("options_candidates.csv"):
     st.warning("⚠️ No broad scan data found on the server. Please click '🚀 Trigger Live Market Scan' in the sidebar.")
 else:
@@ -117,11 +114,13 @@ else:
     col_c.metric("🛡️ Filtered (Stayed in Cash)", f"{stay_cash} Stocks")
     st.markdown("---")
     
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # 5 tabs including our new interactive Backtester panel
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔥 Directional Buying (Calls/Puts)", 
         "🛡️ Premium Collection (CSPs)", 
         "📋 All Active Candidates",
-        "🔍 Hidden Audit Trail (Rejected Names)"
+        "🔍 Hidden Audit Trail (Rejected Names)",
+        "📊 Interactive Backtest Engine"
     ])
     
     with tab1:
@@ -145,3 +144,76 @@ else:
         st.subheader("Stocks Evaluated and Intentionally Blocked by Filters")
         rejected_df = df[df["RECOMMENDED ACTION"].str.contains("STAY IN CASH", na=False)]
         st.dataframe(rejected_df[["Ticker", "Price", "vs 20-EMA", "Implied Vol (IV)", "RECOMMENDED ACTION", "Reasoning Breakdown"]], use_container_width=True, hide_index=True)
+
+    with tab5:
+        st.subheader("⚙️ Run a Historical Backtest Simulation")
+        st.caption("Simulate how the 20-EMA breakout rules performed historically over long horizons.")
+        
+        # User Configuration Parameters
+        bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
+        bt_symbol = bt_col1.text_input("Ticker to Backtest:", value="SPY").upper().strip()
+        bt_years = bt_col2.slider("Historical Horizons (Years)", min_value=1, max_value=5, value=3)
+        bt_target = bt_col3.slider("Take Profit Target (%)", min_value=1, max_value=15, value=5) / 100
+        bt_stop = bt_col4.slider("Stop Loss Limit (%)", min_value=1, max_value=10, value=3) / 100
+        
+        if st.button("📈 Execute Historical Backtest"):
+            with st.spinner(f"Running historical simulation for {bt_symbol}..."):
+                try:
+                    bt_ticker = yf.Ticker(bt_symbol)
+                    bt_df = bt_ticker.history(period=f"{bt_years}y")
+                    
+                    if bt_df.empty or len(bt_df) < 50:
+                        st.error("Insufficient historical trading records found.")
+                    else:
+                        bt_df['20_EMA'] = bt_df['Close'].ewm(span=20, adjust=False).mean()
+                        in_pos = False
+                        ent_price = 0
+                        ent_date = None
+                        sim_trades = []
+                        
+                        for idx in range(20, len(bt_df)):
+                            c_date = bt_df.index[idx]
+                            c_close = bt_df['Close'].iloc[idx]
+                            p_close = bt_df['Close'].iloc[idx-1]
+                            c_ema = bt_df['20_EMA'].iloc[idx]
+                            p_ema = bt_df['20_EMA'].iloc[idx-1]
+                            
+                            if not in_pos:
+                                if p_close <= p_ema and c_close > c_ema:
+                                    in_pos = True
+                                    ent_price = c_close
+                                    ent_date = c_date
+                            else:
+                                return_pct = (c_close - ent_price) / ent_price
+                                trade_days = (c_date - ent_date).days
+                                
+                                if return_pct >= bt_target:
+                                    sim_trades.append({"Entry Date": ent_date.strftime('%Y-%m-%d'), "Exit Date": c_date.strftime('%Y-%m-%d'), "Performance": f"+{bt_target*100:.1f}%", "Result": "WIN"})
+                                    in_pos = False
+                                elif return_pct <= -bt_stop:
+                                    sim_trades.append({"Entry Date": ent_date.strftime('%Y-%m-%d'), "Exit Date": c_date.strftime('%Y-%m-%d'), "Performance": f"-{bt_stop*100:.1f}%", "Result": "LOSS"})
+                                    in_pos = False
+                                elif trade_days >= 30:
+                                    sim_trades.append({"Entry Date": ent_date.strftime('%Y-%m-%d'), "Exit Date": c_date.strftime('%Y-%m-%d'), "Performance": f"{return_pct*100:+.1f}%", "Result": "TIMEOUT"})
+                                    in_pos = False
+                                    
+                        if not sim_trades:
+                            st.info("No trading signals were triggered based on these rules in the specified timeframe.")
+                        else:
+                            t_df = pd.DataFrame(sim_trades)
+                            total_t = len(t_df)
+                            wins_t = len(t_df[t_df['Result'] == 'WIN'])
+                            win_rate_t = (wins_t / total_t) * 100
+                            
+                            # Metrics presentation
+                            m_col1, m_col2, m_col3 = st.columns(3)
+                            m_col1.metric("Total Trades Simulated", f"{total_t} Setups")
+                            m_col2.metric("Strategy Win Rate", f"{win_rate_t:.1f}%")
+                            
+                            b_and_h = ((bt_df['Close'].iloc[-1] - bt_df['Close'].iloc[0]) / bt_df['Close'].iloc[0]) * 100
+                            m_col3.metric("Benchmark Buy & Hold", f"{b_and_h:+.1f}%")
+                            
+                            st.subheader("Detailed Trade Ledger")
+                            st.dataframe(t_df, use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.error(f"Backtester error: {e}")
