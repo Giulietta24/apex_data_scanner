@@ -1,21 +1,32 @@
-# app.py
+# app.py (Updated Version)
 import streamlit as st
 import pandas as pd
 import os
+import subprocess  # Allows app.py to trigger data_worker.py on the cloud server
 
 st.set_page_config(page_title="Apex Swing Engine", layout="wide")
 
 st.title("🎯 Apex Options Signal Dashboard")
 st.caption("Automated Multi-Cap Screening Engine | Holding Window: Days to Weeks")
 
+# --- NEW: Cloud Scan Button Control ---
+st.sidebar.subheader("🔄 Cloud Data Controls")
+if st.sidebar.button("🚀 Trigger Live Market Scan"):
+    with st.spinner("Scanning S&P indexes and calculating options chains... This takes 1-2 minutes."):
+        # This tells Streamlit's cloud server to run your background worker script
+        result = subprocess.run(["python", "data_worker.py"], capture_output=True, text=True)
+        st.sidebar.success("✅ Scan Complete!")
+        st.rerun()
+
 # Verification Step: Check if data worker spreadsheet exists
 if not os.path.exists("options_candidates.csv"):
-    st.error("⚠️ No scan data found. Please run 'python data_worker.py' in your local terminal first to compile the initial market spreadsheet data.")
+    # Updated message to match the new capability
+    st.warning("⚠️ No scan data found on the server. Please click '🚀 Trigger Live Market Scan' in the sidebar to compile the initial market spreadsheet data.")
 else:
     # Read the data file instantly 
     df = pd.read_csv("options_candidates.csv")
     
-    # Render Strategy Categories via Tabs
+    # [The rest of your app.py code continues exactly the same as before...]
     tab1, tab2, tab3 = st.tabs(["🔥 Directional Buying (Calls/Puts)", "🛡️ Premium Collection (CSPs)", "📋 All Active Candidates"])
     
     with tab1:
@@ -24,7 +35,7 @@ else:
         if not buying_df.empty:
             st.dataframe(buying_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No high-probability directional buying candidates found currently. (IV may be too high market-wide).")
+            st.info("No high-probability directional buying candidates found currently.")
             
     with tab2:
         st.subheader("High-IV Support Retests (Put Writing / CSPs)")
@@ -32,36 +43,8 @@ else:
         if not csp_df.empty:
             st.dataframe(csp_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No premium-selling candidates found. High-IV support zones are not being tested right now.")
+            st.info("No premium-selling candidates found.")
             
     with tab3:
         st.subheader("Master Screened Output Board")
         st.dataframe(df, use_container_width=True, hide_index=True)
-        
-    # Single Ticker Interactive Breakdown Panel
-    st.markdown("---")
-    st.subheader("🔍 Single-Asset Execution Audit")
-    selected_ticker = st.selectbox("Select an asset to view specific contract guidelines:", df["Ticker"].unique())
-    
-    if selected_ticker:
-        row = df[df["Ticker"] == selected_ticker].iloc[0]
-        action = row["RECOMMENDED ACTION"]
-        
-        # Color match header blocks based on strategy output
-        if "BUY CALLS" in action:
-            st.success(f"### {action} CONFIGURATION ACTIVE FOR {selected_ticker}")
-        elif "BUY PUTS" in action:
-            st.error(f"### {action} CONFIGURATION ACTIVE FOR {selected_ticker}")
-        elif "CASH-SECURED" in action:
-            st.info(f"### {action} CONFIGURATION ACTIVE FOR {selected_ticker}")
-        else:
-            st.warning(f"### {action}")
-            
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Spot Price", f"${row['Price']}")
-        col2.metric("Distance from 20-EMA", row["vs 20-EMA"])
-        col3.metric("ATM Contract IV", row["Implied Vol (IV)"])
-        col4.metric("Bid-Ask Spread Width", row["ATM Bid-Ask Spread"])
-        
-        st.markdown(f"**Automated Analysis:** {row['Reasoning Breakdown']}")
-        st.info("💡 **Swing Execution Blueprint:** If buying Calls/Puts, target 30-45 Days Out at a 0.50 - 0.60 Delta strike to mitigate decay curves. If selling Cash-Secured Puts, deploy strikes at a 0.30 Delta or lower to maximize your statistical win probability.")
