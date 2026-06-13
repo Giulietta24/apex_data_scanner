@@ -18,7 +18,6 @@ st.caption("Automated Multi-Cap Screening Engine | Holding Window: Days to Weeks
 # --- SIDEBAR CONTROLS ---
 st.sidebar.subheader("🔄 Cloud Data Controls")
 
-# 1. Broad Scan Button
 if st.sidebar.button("🚀 Trigger Live Market Scan"):
     with st.status("🕵️‍♂️ Crawling Indexes & Analyzing Options Chains...", expanded=True) as status:
         try:
@@ -32,13 +31,10 @@ if st.sidebar.button("🚀 Trigger Live Market Scan"):
 
 st.sidebar.markdown("---")
 
-# 2. Custom Ticker Manual Audit Box
 st.sidebar.subheader("🔍 Instant Single-Ticker Audit")
 custom_symbol = st.sidebar.text_input("Type any stock symbol (e.g., TSLA, PLTR, IWM):").upper().strip()
 
 # --- MAIN DASHBOARD INTERFACE ---
-
-# Single Ticker Instant Look-up Rendering
 if custom_symbol:
     st.subheader(f"⚡ Instant On-Demand Audit for: {custom_symbol}")
     with st.spinner(f"Fetching real-time metrics for {custom_symbol}..."):
@@ -98,7 +94,6 @@ if custom_symbol:
         except Exception as err:
             st.error(f"Failed to scan {custom_symbol}: {err}")
 
-# Baseline Global Data Matrix Processing
 if not os.path.exists("options_candidates.csv"):
     st.warning("⚠️ No broad scan data found on the server. Please click '🚀 Trigger Live Market Scan' in the sidebar.")
 else:
@@ -114,7 +109,6 @@ else:
     col_c.metric("🛡️ Filtered (Stayed in Cash)", f"{stay_cash} Stocks")
     st.markdown("---")
     
-    # 5 tabs including our new interactive Backtester panel
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔥 Directional Buying (Calls/Puts)", 
         "🛡️ Premium Collection (CSPs)", 
@@ -147,23 +141,27 @@ else:
 
     with tab5:
         st.subheader("⚙️ Run a Historical Backtest Simulation")
-        st.caption("Simulate how the 20-EMA breakout rules performed historically over long horizons.")
+        st.caption("Simulate performance across the specific strategy configurations.")
         
-        # User Configuration Parameters
-        bt_col1, bt_col2, bt_col3, bt_col4 = st.columns(4)
+        # Extended User Inputs
+        bt_col1, bt_col2, bt_col3, bt_col4, bt_col5 = st.columns(5)
         bt_symbol = bt_col1.text_input("Ticker to Backtest:", value="SPY").upper().strip()
-        bt_years = bt_col2.slider("Historical Horizons (Years)", min_value=1, max_value=5, value=3)
-        bt_target = bt_col3.slider("Take Profit Target (%)", min_value=1, max_value=15, value=5) / 100
-        bt_stop = bt_col4.slider("Stop Loss Limit (%)", min_value=1, max_value=10, value=3) / 100
+        
+        # NEW: DROPDOWN FOR SELECTING STRATEGY REGIME
+        bt_strategy = bt_col2.selectbox("Strategy to Test:", ["🟢 BUY CALLS (Bullish)", "🔴 BUY PUTS (Bearish)", "🔵 SELL CSPs (Premium Collection)"])
+        
+        bt_years = bt_col3.slider("Horizon (Years)", min_value=1, max_value=5, value=3)
+        bt_target = bt_col4.slider("Profit Target (%)", min_value=1, max_value=15, value=5) / 100
+        bt_stop = bt_col5.slider("Stop Loss (%)", min_value=1, max_value=10, value=3) / 100
         
         if st.button("📈 Execute Historical Backtest"):
-            with st.spinner(f"Running historical simulation for {bt_symbol}..."):
+            with st.spinner(f"Running historical simulation..."):
                 try:
                     bt_ticker = yf.Ticker(bt_symbol)
                     bt_df = bt_ticker.history(period=f"{bt_years}y")
                     
                     if bt_df.empty or len(bt_df) < 50:
-                        st.error("Insufficient historical trading records found.")
+                        st.error("Insufficient historical records found.")
                     else:
                         bt_df['20_EMA'] = bt_df['Close'].ewm(span=20, adjust=False).mean()
                         in_pos = False
@@ -179,12 +177,22 @@ else:
                             p_ema = bt_df['20_EMA'].iloc[idx-1]
                             
                             if not in_pos:
-                                if p_close <= p_ema and c_close > c_ema:
-                                    in_pos = True
-                                    ent_price = c_close
-                                    ent_date = c_date
+                                # CALLS: Enter when price breaks ABOVE 20-EMA
+                                if "BUY CALLS" in bt_strategy and p_close <= p_ema and c_close > c_ema:
+                                    in_pos, ent_price, ent_date = True, c_close, c_date
+                                # PUTS: Enter when price breaks BELOW 20-EMA
+                                elif "BUY PUTS" in bt_strategy and p_close >= p_ema and c_close < c_ema:
+                                    in_pos, ent_price, ent_date = True, c_close, c_date
+                                # CSPs: Enter on pullbacks holding ABOVE 20-EMA
+                                elif "SELL CSPs" in bt_strategy and p_close > p_ema and c_close > c_ema and (c_close - c_ema)/c_ema < 0.01:
+                                    in_pos, ent_price, ent_date = True, c_close, c_date
                             else:
-                                return_pct = (c_close - ent_price) / ent_price
+                                # Calculate Directional Gains
+                                if "BUY PUTS" in bt_strategy:
+                                    return_pct = (ent_price - c_close) / ent_price  # Profits when price falls
+                                else:
+                                    return_pct = (c_close - ent_price) / ent_price  # Profits when price rises
+                                    
                                 trade_days = (c_date - ent_date).days
                                 
                                 if return_pct >= bt_target:
@@ -198,14 +206,13 @@ else:
                                     in_pos = False
                                     
                         if not sim_trades:
-                            st.info("No trading signals were triggered based on these rules in the specified timeframe.")
+                            st.info("No trading signals matched these rules in the specified timeframe.")
                         else:
                             t_df = pd.DataFrame(sim_trades)
                             total_t = len(t_df)
                             wins_t = len(t_df[t_df['Result'] == 'WIN'])
                             win_rate_t = (wins_t / total_t) * 100
                             
-                            # Metrics presentation
                             m_col1, m_col2, m_col3 = st.columns(3)
                             m_col1.metric("Total Trades Simulated", f"{total_t} Setups")
                             m_col2.metric("Strategy Win Rate", f"{win_rate_t:.1f}%")
