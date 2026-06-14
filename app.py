@@ -66,7 +66,6 @@ if custom_symbol:
                 except:
                     pass
                 
-                # Dynamic Logic Architecture
                 if iv > 100:
                     strategy, status_type = "⚠️ STAY IN CASH", "warning"
                     reason = f"Asset sitting inside volatility chop zone ({iv:.1f}% IV). Insufficient directional edge."
@@ -113,9 +112,11 @@ else:
     col_c.metric("🛡️ Filtered (Stayed in Cash)", f"{stay_cash} Stocks")
     st.markdown("---")
     
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    # NEW: Added Tab 3 ("🛰️ Idiosyncratic Alpha Screen")
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "🔥 Directional Buying (Calls/Puts)", 
         "🛡️ Premium Collection (CSPs)", 
+        "🛰️ Idiosyncratic Alpha Screen",
         "📋 All Active Candidates",
         "🔍 Hidden Audit Trail (Rejected Names)",
         "🔮 Advanced Future-Probability Backtester"
@@ -132,18 +133,90 @@ else:
         csp_df = df[df["RECOMMENDED ACTION"].str.contains("CASH-SECURED", na=False)]
         if not csp_df.empty: st.dataframe(csp_df, use_container_width=True, hide_index=True)
         else: st.info("No premium-selling candidates found.")
-            
+
     with tab3:
+        st.subheader("🛰️ Market-Decoupled Alpha Matrix")
+        st.caption("Scans active candidates using real-time sync to pinpoint tickers whose setups survive independent of S&P 500 market risk.")
+        
+        active_candidates = df[df["RECOMMENDED ACTION"].str.contains("BUY|CASH-SECURED", na=False)]["Ticker"].unique().tolist()
+        
+        if not active_candidates:
+            st.info("No active candidates currently available to screen for Alpha.")
+        else:
+            if st.button("🛰️ Extract Market-Decoupled Alpha"):
+                alpha_leads = []
+                with st.spinner(f"Extracting historical beta values across {len(active_candidates)} assets..."):
+                    try:
+                        spy_h = yf.Ticker("SPY").history(period="3y")
+                        for sym in active_candidates:
+                            a_h = yf.Ticker(sym).history(period="3y")
+                            if a_h.empty or len(a_h) < 200: continue
+                            
+                            c_df = a_h.join(spy_h['Close'].rename('SPY_Close'), how='inner')
+                            c_df['20_EMA'] = c_df['Close'].ewm(span=20, adjust=False).mean()
+                            c_df['SPY_200_EMA'] = c_df['SPY_Close'].ewm(span=200, adjust=False).mean()
+                            
+                            in_pos, ent_p, win_macro, tot_macro, win_div, tot_div = False, 0.0, 0, 0, 0, 0
+                            
+                            for idx in range(200, len(c_df)):
+                                if not in_pos:
+                                    if c_df['Close'].iloc[idx-1] <= c_df['20_EMA'].iloc[idx-1] and c_df['Close'].iloc[idx] > c_df['20_EMA'].iloc[idx]:
+                                        in_pos = True
+                                        ent_p = float(c_df['Close'].iloc[idx])
+                                        is_macro_b = c_df['SPY_Close'].iloc[idx] > c_df['SPY_200_EMA'].iloc[idx]
+                                        t_type = "MACRO" if is_macro_b else "DIV"
+                                        days_in = 0
+                                else:
+                                    days_in += 1
+                                    ret = (c_df['Close'].iloc[idx] - ent_p) / ent_p
+                                    if ret >= 0.10:
+                                        if t_type == "MACRO": win_macro += 1; tot_macro += 1
+                                        else: win_div += 1; tot_div += 1
+                                        in_pos = False
+                                    elif ret <= -0.05:
+                                        if t_type == "MACRO": tot_macro += 1
+                                        else: tot_div += 1
+                                        in_pos = False
+                                    elif days_in >= 21:
+                                        in_pos = False
+                            
+                            m_wr = (win_macro / tot_macro * 100) if tot_macro > 0 else 0.0
+                            d_wr = (win_div / tot_div * 100) if tot_div > 0 else 0.0
+                            
+                            # Alpha Filter Constraint: Setup must show strong independent resilience when broad index fails
+                            if d_wr >= 45.0:
+                                row_info = df[df["Ticker"] == sym].iloc[0]
+                                current_iv = row_info["Implied Vol (IV)"]
+                                clean_iv = float(str(current_iv).replace('%','').strip()) if pd.notnull(current_iv) else 30.0
+                                
+                                play = "🟢 BUY CALLS" if clean_iv < 50 else "🔵 SELL CSPs (High IV Yield)"
+                                alpha_leads.append({
+                                    "Ticker": sym,
+                                    "Macro Bull Win Rate": f"{m_wr:.1f}%",
+                                    "Divergent Bear Win Rate": f"{d_wr:.1f}%",
+                                    "Alpha Score": f"+{(d_wr - 40.0):.1f}",
+                                    "Optimal Exploitation Play": play
+                                })
+                                
+                        if alpha_leads:
+                            st.success(f"🎯 Successfully isolated {len(alpha_leads)} Idiosyncratic Alpha Engines!")
+                            st.dataframe(pd.DataFrame(alpha_leads).sort_values(by="Alpha Score", ascending=False), use_container_width=True, hide_index=True)
+                        else:
+                            st.warning("All current assets show high correlation to market trends. No uncoupled Alpha detected in this batch.")
+                    except Exception as ex:
+                        st.error(f"Alpha Sorting Engine Interrupted: {ex}")
+            
+    with tab4:
         st.subheader("Master Screened Output Board")
         active_df = df[df["RECOMMENDED ACTION"].str.contains("BUY|CASH-SECURED", na=False)]
         st.dataframe(active_df, use_container_width=True, hide_index=True)
         
-    with tab4:
+    with tab5:
         st.subheader("Stocks Evaluated and Intentionally Blocked by Filters")
         rejected_df = df[df["RECOMMENDED ACTION"].str.contains("STAY IN CASH", na=False)]
         st.dataframe(rejected_df[["Ticker", "Price", "vs 20-EMA", "Implied Vol (IV)", "RECOMMENDED ACTION", "Reasoning Breakdown"]], use_container_width=True, hide_index=True)
 
-    with tab5:
+    with tab6:
         st.subheader("🔮 Advanced Future-Probability Backtest Engine")
         st.caption("Filters historical setups through Macro Regimes to model real option outcomes.")
         
@@ -164,9 +237,7 @@ else:
                     if asset_df.empty or spy_df.empty:
                         st.error("Missing synchronization records.")
                     else:
-                        # Fully synchronize data arrays
                         combined_df = asset_df.join(spy_df['Close'].rename('SPY_Close'), how='inner')
-                        
                         combined_df['20_EMA'] = combined_df['Close'].ewm(span=20, adjust=False).mean()
                         combined_df['SPY_200_EMA'] = combined_df['SPY_Close'].ewm(span=200, adjust=False).mean()
                         
@@ -188,21 +259,17 @@ else:
                             macro_bullish = spy_price > spy_ema200
                             
                             if not in_pos:
-                                # CALLS entry verification
                                 if "BUY CALLS" in bt_strategy and p_close <= p_ema and c_close > c_ema:
                                     in_pos = True
                                     ent_price = float(c_close)
                                     ent_date = c_date
                                     trade_regime = "🟢 BULLISH MACRO" if macro_bullish else "⚠️ BEAR TRAP RISK"
-                                    
-                                # PUTS entry verification
                                 elif "BUY PUTS" in bt_strategy and p_close >= p_ema and c_close < c_ema:
                                     in_pos = True
                                     ent_price = float(c_close)
                                     ent_date = c_date
                                     trade_regime = "🔴 BEARISH MACRO" if not macro_bullish else "⚠️ BULL TRAP RISK"
                             else:
-                                # Fixed: Inverted math matrix processing for short positions
                                 if "BUY PUTS" in bt_strategy:
                                     return_pct = (ent_price - c_close) / ent_price
                                 else:
@@ -210,7 +277,6 @@ else:
                                     
                                 trade_days = (c_date - ent_date).days
                                 
-                                # Process exit configurations with rigid state resets
                                 if return_pct >= bt_target:
                                     sim_trades.append({"Date": ent_date.strftime('%Y-%m-%d'), "Regime State": trade_regime, "Result": "WIN", "Real Option Est": f"+{bt_target*250:.0f}% 🔥"})
                                     in_pos = False
@@ -225,8 +291,6 @@ else:
                             st.info("No system signals triggered under these combined rules.")
                         else:
                             t_df = pd.DataFrame(sim_trades)
-                            
-                            # Categorize buckets explicitly matching the trade regime assigned at generation
                             bull_setups = t_df[t_df['Regime State'].str.contains("BULLISH MACRO|BEARISH MACRO", na=False)]
                             trap_setups = t_df[t_df['Regime State'].str.contains("RISK", na=False)]
                             
@@ -234,7 +298,6 @@ else:
                             win_rate_trap = (len(trap_setups[trap_setups['Result'] == 'WIN']) / len(trap_setups) * 100) if len(trap_setups) > 0 else 0.0
                             
                             st.subheader("🔮 Predictive Probability Ledger")
-                            
                             pa, pb = st.columns(2)
                             pa.metric("Probability when Macro Confirmed", f"{win_rate_macro:.1f}% Win Rate")
                             pb.metric("Probability during Market Divergence", f"{win_rate_trap:.1f}% Win Rate")
