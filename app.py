@@ -137,30 +137,28 @@ else:
         if csp_base.empty:
             st.info("No high-IV premium-selling candidates found right now.")
         else:
-            # 📅 Compute Precise Calendar Windows (30 to 45 Days to Expiration)
+            # 📅 FIXED CALENDAR STRINGS: Generate explicit, readable dates instead of duplicated months
             today = datetime.now()
-            opt_min_date = (today + timedelta(days=30)).strftime("%Y-%m-%b")
-            opt_max_date = (today + timedelta(days=45)).strftime("%Y-%m-%b")
+            opt_min_date = (today + timedelta(days=30)).strftime("%b %d, %Y")
+            opt_max_date = (today + timedelta(days=45)).strftime("%b %d, %Y")
             
             # 🧮 Compute Intent-Based Math Vectors
             csp_base["Spot"] = csp_base["Price"].apply(lambda x: float(str(x).replace('$','').strip()))
             
-            # Income: Targets ~0.30 Delta (~7-8% lower than spot on high-IV assets)
             csp_base["🎯 INCOME Play Strike"] = (csp_base["Spot"] * 0.93).apply(lambda x: f"${round(x * 2) / 2:.2f}")
-            # Discount Acquisition: Targets deep support cushion (12% lower than spot)
             csp_base["🛍️ DISCOUNT Play Strike"] = (csp_base["Spot"] * 0.88).apply(lambda x: f"${round(x * 2) / 2:.2f}")
             
-            # Format Output View
-            csp_base["Look For Expirations Between"] = f"{opt_min_date} and {opt_max_date}"
+            # Format Output View Columns
+            csp_base["Expirations Target"] = f"{opt_min_date} to {opt_max_date}"
             
-            final_view = csp_base[["Ticker", "Price", "Implied Vol (IV)", "Look For Expirations Between", "🎯 INCOME Play Strike", "🛍️ DISCOUNT Play Strike"]]
+            final_view = csp_base[["Ticker", "Price", "Implied Vol (IV)", "Expirations Target", "🎯 INCOME Play Strike", "🛍️ DISCOUNT Play Strike"]]
             st.dataframe(final_view, use_container_width=True, hide_index=True)
             
             st.markdown(f"""
             ---
             ### 📌 Operational Playbook for This Batch
             
-            * **Calendar Focus Window:** Open your broker panel and look strictly at expiration dates between **{opt_min_date}** and **{opt_max_date}**. 
+            * **Calendar Focus Window:** Open your broker panel and look strictly at options expiring between **{opt_min_date}** and **{opt_max_date}**.
             
             * **Option A: The Pure Income Play (Keep the Cash)**
               * **Intent:** You do not want to own the stock; you just want to stack cash.
