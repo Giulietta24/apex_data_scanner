@@ -4,6 +4,7 @@ import pandas as pd
 import os
 import yfinance as yf
 import numpy as np
+from datetime import datetime, timedelta
 
 try:
     from data_worker import scan_market
@@ -51,7 +52,7 @@ if custom_symbol:
                 is_bullish = current_price > current_ema
                 trend_pct = ((current_price - current_ema) / current_ema) * 100
                 
-                iv, open_interest, spread_pct = 32.0, 1000, 0.5
+                iv, open_interest = 32.0, 1000
                 try:
                     expirations = ticker.options
                     if expirations:
@@ -112,7 +113,6 @@ else:
     col_c.metric("🛡️ Filtered (Stayed in Cash)", f"{stay_cash} Stocks")
     st.markdown("---")
     
-    # NEW: Added Tab 3 ("🛰️ Idiosyncratic Alpha Screen")
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "🔥 Directional Buying (Calls/Puts)", 
         "🛡️ Premium Collection (CSPs)", 
@@ -129,10 +129,49 @@ else:
         else: st.info("No high-probability directional buying candidates found currently.")
             
     with tab2:
-        st.subheader("High-IV Support Retests (Put Writing / CSPs)")
-        csp_df = df[df["RECOMMENDED ACTION"].str.contains("CASH-SECURED", na=False)]
-        if not csp_df.empty: st.dataframe(csp_df, use_container_width=True, hide_index=True)
-        else: st.info("No premium-selling candidates found.")
+        st.subheader("🛡️ Strategic CSP Premium Deployment Console")
+        st.caption("Farms elevated Implied Volatility to collect income or acquire equity at a structural discount.")
+        
+        csp_base = df[df["RECOMMENDED ACTION"].str.contains("CASH-SECURED", na=False)].copy()
+        
+        if csp_base.empty:
+            st.info("No high-IV premium-selling candidates found right now.")
+        else:
+            # 📅 Compute Precise Calendar Windows (30 to 45 Days to Expiration)
+            today = datetime.now()
+            opt_min_date = (today + timedelta(days=30)).strftime("%Y-%m-%b")
+            opt_max_date = (today + timedelta(days=45)).strftime("%Y-%m-%b")
+            
+            # 🧮 Compute Intent-Based Math Vectors
+            csp_base["Spot"] = csp_base["Price"].apply(lambda x: float(str(x).replace('$','').strip()))
+            
+            # Income: Targets ~0.30 Delta (~7-8% lower than spot on high-IV assets)
+            csp_base["🎯 INCOME Play Strike"] = (csp_base["Spot"] * 0.93).apply(lambda x: f"${round(x * 2) / 2:.2f}")
+            # Discount Acquisition: Targets deep support cushion (12% lower than spot)
+            csp_base["🛍️ DISCOUNT Play Strike"] = (csp_base["Spot"] * 0.88).apply(lambda x: f"${round(x * 2) / 2:.2f}")
+            
+            # Format Output View
+            csp_base["Look For Expirations Between"] = f"{opt_min_date} and {opt_max_date}"
+            
+            final_view = csp_base[["Ticker", "Price", "Implied Vol (IV)", "Look For Expirations Between", "🎯 INCOME Play Strike", "🛍️ DISCOUNT Play Strike"]]
+            st.dataframe(final_view, use_container_width=True, hide_index=True)
+            
+            st.markdown(f"""
+            ---
+            ### 📌 Operational Playbook for This Batch
+            
+            * **Calendar Focus Window:** Open your broker panel and look strictly at expiration dates between **{opt_min_date}** and **{opt_max_date}**. 
+            
+            * **Option A: The Pure Income Play (Keep the Cash)**
+              * **Intent:** You do not want to own the stock; you just want to stack cash.
+              * **Execution:** Sell the **🎯 INCOME Play Strike** option. It aligns roughly with a **0.30 Delta**, giving you an immediate cushion while capturing maximum Theta decay velocity.
+              * **Exit Management:** Set an automatic GTC limit order to buy back the contract the second it drops to **50% of the initial premium collected**.
+              
+            * **Option B: The Value Investor Play (Buy the Discount)**
+              * **Intent:** You love the company's alpha profile and want to buy shares, but refuse to pay full retail price.
+              * **Execution:** Sell the **🛍️ DISCOUNT Play Strike** option. If the stock flushes, you get assigned shares at a deep structural markdown. If it bounces, you get paid to wait.
+              * **Exit Management:** Hold to expiration day to secure maximum markdown or assignment.
+            """)
 
     with tab3:
         st.subheader("🛰️ Market-Decoupled Alpha Matrix")
@@ -183,7 +222,6 @@ else:
                             m_wr = (win_macro / tot_macro * 100) if tot_macro > 0 else 0.0
                             d_wr = (win_div / tot_div * 100) if tot_div > 0 else 0.0
                             
-                            # Alpha Filter Constraint: Setup must show strong independent resilience when broad index fails
                             if d_wr >= 45.0:
                                 row_info = df[df["Ticker"] == sym].iloc[0]
                                 current_iv = row_info["Implied Vol (IV)"]
