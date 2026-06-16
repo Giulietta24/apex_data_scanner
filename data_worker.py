@@ -2,48 +2,59 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
+import os
+from signals import evaluate_signal
 
-def get_market_universe():
-    """Pre-vetted basket across Large, Mid, and Small Caps to guarantee weekend execution stability"""
-    return [
-        "SPY", "QQQ", "IWM", "DIA", 
-        "PLTR", "COIN", "MARA", "RIVN", "SOFI", "HOOD", 
-        "AMD", "XOM", "JPM", "NKE", "DIS", "F", 
-        "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META"
-    ]
+# Separate lists based on underlying asset characteristics 
+EQUITY_UNIVERSE = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "PLTR", "AMD", "NFLX", "MARA", "COIN", "RKLB"]
+ETF_UNIVERSE = ["SPY", "QQQ", "IWM", "DIA"]
 
-def scan_market():
-    ticker_universe = get_market_universe()
+def calculate_rsi(series, periods=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=periods).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=periods).mean()
+    rs = gain / (loss + 1e-10)
+    return 100 - (100 / (1 + rs))
+
+def process_universe_pool(ticker_list, is_etf, rsp_bullish):
     results = []
     
-    print(f"🚀 Starting stable scan for {len(ticker_universe)} assets...")
-    
-    for symbol in ticker_universe:
+    for symbol in ticker_list:
+        print(f"📡 Auditing {symbol}...")
         try:
-            ticker = yf.Ticker(symbol)
+            # Enforce defensive pacing to eliminate provider rate-limiting
+            time.sleep(0.5)
             
-            # --- WEEKEND STABLE HISTORICAL FALLBACK ---
+            ticker = yf.Ticker(symbol)
             hist = ticker.history(period="3mo")
             
-            # If Yahoo returns empty data on the weekend, inject dummy trading data 
-            # so the script is forced to process the asset instead of skipping it!
+            # --- CRITICAL PROTECTION LAYER: NO MOCK DATA INJECTIONS ---
             if hist.empty or len(hist) < 20:
-                current_price = 150.00
-                trend_pct = 1.5
-                is_bullish = True
-                print(f"⚠️ {symbol}: Using weekend mock price configuration.")
-            else:
-                current_price = hist['Close'].iloc[-1]
-                hist['20_EMA'] = hist['Close'].ewm(span=20, adjust=False).mean()
-                current_ema = hist['20_EMA'].iloc[-1]
-                is_bullish = current_price > current_ema
-                trend_pct = ((current_price - current_ema) / current_ema) * 100
+                print(f"⚠️ {symbol}: Incomplete data array returned from provider. Hard skipping ticker.")
+                continue
+                
+            # Compute underlying math
+            current_price = hist['Close'].iloc[-1]
+            hist['20_EMA'] = hist['Close'].ewm(span=20, adjust=False).mean()
+            hist['Vol_MA20'] = hist['Volume'].rolling(window=20).mean()
+            hist['RSI_14'] = calculate_rsi(hist['Close'])
             
-            # --- WEEKEND STABLE OPTIONS FALLBACK ---
-            iv = 32.0  # Safe average baseline
-            open_interest = 1200
-            spread_pct = 0.4
+            current_ema = hist['20_EMA'].iloc[-1]
+            current_vol = hist['Volume'].iloc[-1]
+            avg_vol = hist['Vol_MA20'].iloc[-1]
+            current_rsi = hist['RSI_14'].iloc[-1]
             
+            is_bullish_trend = current_price > current_ema
+            volume_confirmed = current_vol > avg_vol
+            trend_pct = ((current_price - current_ema) / current_ema) * 100
+            
+            # Options defaults
+            iv = 25.0 if is_etf else 45.0  # Context-aware standard default baselines
+            spread_pct = 0.50
+            iv_source = "DEFAULT_BASE"
+            
+            # Process options contracts safely
             try:
                 expirations = ticker.options
                 if expirations:
@@ -54,45 +65,67 @@ def scan_market():
                     if not calls.empty:
                         calls['strike_diff'] = (calls['strike'] - current_price).abs()
                         atm_call = calls.sort_values(by='strike_diff').iloc[0]
-                        iv = (atm_call['impliedVolatility'] * 100) if pd.notnull(atm_call.get('impliedVolatility')) else 32.0
-                        open_interest = int(atm_call['openInterest']) if pd.notnull(atm_call.get('openInterest')) else 1200
-            except Exception:
-                pass # Hold default baseline if options matrix is down for weekend maintenance
+                        
+                        if pd.notnull(atm_call.get('impliedVolatility')):
+                            iv = atm_call['impliedVolatility'] * 100
+                            iv_source = "LIVE_CHAIN"
+                            
+                        # DYNAMIC SPREAD CALCULATION: Replacing hardcoded 0.4% baseline
+                        bid = atm_call.get('bid')
+                        ask = atm_call.get('ask')
+                        if pd.notnull(bid) and pd.notnull(ask) and ask > 0:
+                            spread_pct = ((ask - bid) / ask) * 100
+            except Exception as opt_err:
+                print(f"⚠️ {symbol} Options Chain Failure: {opt_err}. Engaging default risk framework.")
+                iv_source = "FALLBACK_PROTECTED"
+
+            # Execute cross-imported signal computation matrix
+            strategy, reason = evaluate_signal(is_bullish_trend, iv, volume_confirmed, current_rsi, rsp_bullish)
             
-            # --- STRATEGY RULES ROUTER ---
-            if is_bullish and iv < 35:
-                strategy = "🟢 BUY CALLS"
-                reason = f"Breakout above 20 EMA. Option IV ({iv:.1f}%) is cheap."
-            elif not is_bullish and iv < 50:
-                strategy = "🔴 BUY PUTS"
-                reason = f"Breakdown below 20 EMA. IV ({iv:.1f}%) has not spiked yet."
-            elif is_bullish and iv >= 55:
-                strategy = "🔵 SELL CASH-SECURED PUTS"
-                reason = f"Bullish trend, but elevated IV ({iv:.1f}%) favors premium sellers."
-            else:
-                strategy = "🟡 STAY IN CASH"
-                reason = f"Asset sitting inside volatility chop zone ({iv:.1f}% IV). Sitting on hands."
-                
             results.append({
                 "Ticker": symbol,
-                "Price": round(current_price, 2),
-                "vs 20-EMA": f"{trend_pct:+.1f}%",
+                "Price": f"${current_price:.2f}",
+                "vs 20-EMA": f"{trend_pct:+.2f}%",
                 "Implied Vol (IV)": f"{iv:.1f}%",
-                "ATM Bid-Ask Spread": f"{spread_pct:.1f}%",
-                "Open Interest": int(open_interest),
+                "ATM Bid-Ask Spread": f"{spread_pct:.2f}%",
+                "Volume": f"{current_vol:,}",
                 "RECOMMENDED ACTION": strategy,
-                "Reasoning Breakdown": reason
+                "Reasoning Breakdown": reason,
+                "Asset Class": "ETF" if is_etf else "EQUITY",
+                "IV Data Quality": iv_source
             })
-            print(f"✓ Audited {symbol} -> {strategy}")
             
-        except Exception as e:
-            print(f"❌ Error on major loop for {symbol}: {e}")
-            continue 
+        except Exception as ticker_err:
+            print(f"❌ Severe processing exception on global ticker component {symbol}: {ticker_err}")
+            continue
             
-    # Save the finalized dataset
-    df = pd.DataFrame(results)
-    df.to_csv("options_candidates.csv", index=False)
-    print(f"✅ Saved spreadsheet successfully with {len(df)} rows.")
+    return results
+
+def scan_market():
+    print("🚀 Initiating System Scan Profile...")
+    
+    # Calculate Broad Market Equal-Weighted Breadth Baseline
+    rsp_bullish = True
+    try:
+        rsp = yf.Ticker("RSP").history(period="3mo")
+        if not rsp.empty and len(rsp) >= 20:
+            rsp['20_EMA'] = rsp['Close'].ewm(span=20, adjust=False).mean()
+            rsp_bullish = rsp['Close'].iloc[-1] > rsp['20_EMA'].iloc[-1]
+    except Exception as e:
+        print(f"⚠️ RSP Breadth engine lookup failed: {e}. Defaulting broad market matrix to neutral settings.")
+
+    # Process individual asset universes separately 
+    equity_results = process_universe_pool(EQUITY_UNIVERSE, is_etf=False, rsp_bullish=rsp_bullish)
+    etf_results = process_universe_pool(ETF_UNIVERSE, is_etf=True, rsp_bullish=rsp_bullish)
+    
+    master_results = equity_results + etf_results
+    
+    if master_results:
+        df = pd.DataFrame(master_results)
+        df.to_csv("options_candidates.csv", index=False)
+        print(f"✅ Database Export Matrix Updated Successfully with {len(df)} Live Audited Records.")
+    else:
+        print("🛑 Scan completed with zero viable output datasets. File export bypassed to avoid bricking cache layers.")
 
 if __name__ == "__main__":
     scan_market()
