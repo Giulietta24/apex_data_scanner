@@ -5,11 +5,7 @@ import os
 import yfinance as yf
 import numpy as np
 from datetime import datetime, timedelta
-
-try:
-    from data_worker import scan_market
-except ImportError:
-    st.error("⚠️ Could not find data_worker.py in the same directory.")
+from signals import evaluate_signal
 
 st.set_page_config(page_title="Apex Trading Engine", layout="wide")
 
@@ -32,7 +28,6 @@ def fetch_synchronized_macro_data(symbol, horizon_years=3):
         spy_h = yf.Ticker("SPY").history(period=f"{horizon_years}y")
         if asset_h.empty or spy_h.empty:
             return pd.DataFrame()
-        # Synchronize dates via inner join
         combined = asset_h.join(spy_h['Close'].rename('SPY_Close'), how='inner')
         return combined
     except:
@@ -60,7 +55,7 @@ def fetch_breadth_metrics_panel():
         try:
             df = yf.Ticker(ticker).history(period="3mo")
             if df.empty: 
-                raise ValueError("Returned data frame is empty.")
+                raise ValueError("Returned dataframe is empty.")
                 
             df['20_EMA'] = df['Close'].ewm(span=20, adjust=False).mean()
             df['50_MA'] = df['Close'].rolling(window=50).mean()
@@ -97,27 +92,20 @@ def fetch_live_vix_metrics():
     except:
         return 18.0, 0.0
 
-# --- TECHNICAL INDICATORS ---
-def calculate_rsi(series, periods=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=periods).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=periods).mean()
-    rs = gain / (loss + 1e-10)
-    return 100 - (100 / (1 + rs))
-
-# --- SIDEBAR CONTROLS ---
+# --- CONTROLS ---
 st.sidebar.subheader("🔄 Data Refresh Controls")
 
 if st.sidebar.button("🚀 Trigger Live Market Scan"):
     with st.status("Scanning indices & downloading options data...", expanded=True) as status:
         try:
+            from data_worker import scan_market
             scan_market() 
             status.update(label="✅ Live Market Scan Complete!", state="complete", expanded=False)
             st.sidebar.success("Data Refreshed!")
             st.rerun()
         except Exception as e:
             status.update(label="❌ Scan Failed", state="error")
-            st.error(f"Data worker processing error: {e}")
+            st.error(f"Data worker error: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔍 Single-Ticker Audit")
@@ -134,12 +122,14 @@ if submit_audit and custom_symbol_input:
         ticker = yf.Ticker(custom_symbol_input)
         rsp_confirmed_bullish, current_rsp_price = fetch_rsp_market_health()
         
+        # FIX HARDENED PROTECTION LAYER: No fallback variables on UI panel error. Hard stop execution.
         if hist.empty or len(hist) < 20:
-            st.error(f"Could not retrieve sufficient technical data for '{custom_symbol_input}'.")
+            st.error(f"❌ Error: Could not retrieve sufficient or valid historical data for '{custom_symbol_input}'. Audit aborted.")
         else:
             current_price = hist['Close'].iloc[-1]
             hist['20_EMA'] = hist['Close'].ewm(span=20, adjust=False).mean()
             hist['Vol_MA20'] = hist['Volume'].rolling(window=20).mean()
+            from data_worker import calculate_rsi
             hist['RSI_14'] = calculate_rsi(hist['Close'])
             
             current_ema = hist['20_EMA'].iloc[-1]
@@ -148,14 +138,12 @@ if submit_audit and custom_symbol_input:
             current_rsi = hist['RSI_14'].iloc[-1]
             
             trend_pct = ((current_price - current_ema) / current_ema) * 100
-            
             is_bullish_trend = current_price > current_ema
             volume_confirmed = current_vol > avg_vol
-            rsi_safe_long = current_rsi < 75 if not pd.isna(current_rsi) else True
-            rsi_safe_short = current_rsi > 30 if not pd.isna(current_rsi) else True
             
-            iv, open_interest = 32.0, 1000
-            iv_is_fallback = False
+            iv = 45.0
+            spread_pct = 0.50
+            iv_source = "DEFAULT_BASE"
             
             try:
                 expirations = ticker.options
@@ -168,54 +156,35 @@ if submit_audit and custom_symbol_input:
                         atm_call = calls.sort_values(by='strike_diff').iloc[0]
                         if pd.notnull(atm_call.get('impliedVolatility')):
                             iv = atm_call['impliedVolatility'] * 100
-                        if pd.notnull(atm_call.get('openInterest')):
-                            open_interest = int(atm_call['openInterest'])
+                            iv_source = "LIVE_CHAIN"
+                        bid = atm_call.get('bid')
+                        ask = atm_call.get('ask')
+                        if pd.notnull(bid) and pd.notnull(ask) and ask > 0:
+                            spread_pct = ((ask - bid) / ask) * 100
             except Exception as opt_err:
-                iv_is_fallback = True
-                st.warning(f"⚠️ Live Options Chain Missing: {opt_err}. Falling back to historical asset volatility metrics.")
+                iv_source = "FALLBACK_UI_ERR"
+                st.warning(f"⚠️ Live Options Chain Missing: {opt_err}. Falling back to asset baseline defaults.")
             
-            # --- SIGNAL TREE FILTER LOGIC ---
-            if iv > 100:
-                strategy, status_type = "⚠️ STAY IN CASH", "warning"
-                reason = f"Asset implied volatility is abnormally high ({iv:.1f}% IV), representing excessive binary risk."
-            elif is_bullish_trend and iv < 35 and volume_confirmed and rsi_safe_long:
-                if rsp_confirmed_bullish:
-                    strategy, status_type = "🟢 BUY CALLS", "success"
-                    reason = f"Confirmed technical breakout above the 20-EMA. Broad market participation (RSP) is healthy, validating upward momentum."
-                else:
-                    strategy, status_type = "⚠️ STAY IN CASH (MARKET TRAP)", "warning"
-                    reason = f"The individual ticker is breaking out, but the Equal-Weighted S&P (RSP) is in a macro downtrend. Entry blocked to prevent buying a low-breadth fakeout."
-            elif not is_bullish_trend and iv < 50 and volume_confirmed and rsi_safe_short:
-                strategy, status_type = "🔴 BUY PUTS", "error"
-                reason = f"Bearish trajectory breakdown below the 20-EMA line. High distribution volume confirms selling pressure."
-            elif is_bullish_trend and iv >= 55:
-                if rsp_confirmed_bullish:
-                    strategy, status_type = "🔵 SELL CASH-SECURED PUTS", "info"
-                    reason = f"Bullish trend structure paired with highly inflated implied options premiums. RSP confirms underlying market support."
-                else:
-                    strategy, status_type = "⚠️ STAY IN CASH (PREMIUM RISK)", "warning"
-                    reason = f"High IV makes selling premium attractive, but the Equal-Weighted index is macro-bearish. Risk of sudden underlying assignment is high."
-            else:
-                strategy, status_type = "🟡 STAY IN CASH", "warning"
-                reason = f"Setup rejected due to technical divergence or missing momentum confirmations. Vol Confirmed: {volume_confirmed} | RSI: {current_rsi:.1f}"
+            # CALL SHARED SIGNALS OBJECT FOR ABSOLUTE CONSISTENCY
+            strategy, reason = evaluate_signal(is_bullish_trend, iv, volume_confirmed, current_rsi, rsp_confirmed_bullish)
             
-            if status_type == "success": st.success(f"### Strategy Signal: {strategy}")
-            elif status_type == "error": st.error(f"### Strategy Signal: {strategy}")
-            elif status_type == "info": st.info(f"### Strategy Signal: {strategy}")
+            if "BUY CALLS" in strategy: st.success(f"### Strategy Signal: {strategy}")
+            elif "BUY PUTS" in strategy: st.error(f"### Strategy Signal: {strategy}")
+            elif "CASH-SECURED" in strategy: st.info(f"### Strategy Signal: {strategy}")
             else: st.warning(f"### Strategy Signal: {strategy}")
             
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Spot Price", f"${current_price:.2f}")
             col2.metric("Distance from 20-EMA", f"{trend_pct:+.1f}%")
-            col3.metric("ATM Option Implied Volatility", f"{iv:.1f}%" + (" (Fallback)" if iv_is_fallback else ""))
+            col2.caption(f"Spread Level: {spread_pct:.2f}%")
+            col3.metric("ATM Option Implied Volatility", f"{iv:.1f}%", delta=f"Source: {iv_source}", delta_color="off")
             col4.metric("RSI (14-Day Momentum)", f"{current_rsi:.1f}" if not pd.isna(current_rsi) else "N/A")
             
-            st.caption(f"🌍 Broad Market Baseline: Equal-Weighted S&P 500 (RSP) is {'🟢 BULLISH' if rsp_confirmed_bullish else '🔴 BEARISH'}")
             st.markdown(f"**Audit Breakdown:** {reason}")
             st.markdown("---")
 
 if not os.path.exists("options_candidates.csv"):
-    st.warning("⚠️ No database scanner output located on server. Please run a Live Market Scan in the sidebar to generate data files.")
+    st.warning("⚠️ No active options database file located. Please run a Live Market Scan in the sidebar to populate data parameters.")
 else:
     df = pd.read_csv("options_candidates.csv")
     
@@ -273,29 +242,20 @@ else:
         "🛰️ Idiosyncratic Alpha Screen",
         "📋 All Active Candidates",
         "🔍 Audit Trail (Rejected Tickers)",
-        "🔮 Equity Signal Backtester" # RENAME: Changed tab name from Options to Equity to match return math
+        "🔮 Equity Signal Backtester"
     ])
     
     with tab0:
         st.subheader("🌍 Macro-Index Trend Participation Radar")
-        st.caption("Tracks underlying market health across core indexing mechanisms.")
-        
-        # FIX BARE EXCEPT: Explicit error printing for indexing pipelines
         if breadth_errors:
-            for err in breadth_errors:
-                st.caption(err)
-                
-        if not breadth_df.empty:
-            st.dataframe(breadth_df, use_container_width=True, hide_index=True)
+            for err in breadth_errors: st.caption(err)
+        if not breadth_df.empty: st.dataframe(breadth_df, use_container_width=True, hide_index=True)
         
         st.markdown("---")
         st.subheader("📊 Synthesized Breadth Analytics")
-        st.caption("Aggregated statistical readings computed across the scanned database population.")
-        
         m_col1, m_col2, m_col3 = st.columns(3)
         m_col1.metric(label="📈 Advance / Decline Ratio", value=f"{ad_ratio:.2f}x", delta="Advancers Dominant" if ad_ratio > 1.0 else "Decliners Dominant")
         m_col2.metric(label="🔊 Institutional Volume Ratio", value=f"{vol_ratio_pct:.1f}%", delta="Net Inflow Allocation" if vol_ratio_pct > 55 else "Net Outflow Distribution")
-        
         df['Clean_vs_EMA'] = df['vs 20-EMA'].apply(clean_numeric_col) if 'vs 20-EMA' in df.columns else 0.0
         net_high_low_spread = len(df[df['Clean_vs_EMA'] > 8.0]) - len(df[df['Clean_vs_EMA'] < -8.0])
         m_col3.metric(label="🎯 High / Low Extension Spread", value=f"{net_high_low_spread:+d}", delta="Expansion" if net_high_low_spread >= 0 else "Contraction")
@@ -304,13 +264,13 @@ else:
         st.subheader("Low Implied-Volatility Breakout Setups")
         buying_df = df[df["RECOMMENDED ACTION"].str.contains("BUY", na=False)]
         if not buying_df.empty: st.dataframe(buying_df, use_container_width=True, hide_index=True)
-        else: st.info("No qualitative directional buying setups identified currently.")
+        else: st.info("No directional signals identified across this data sweep context currently.")
             
     with tab2:
-        st.subheader("🛡️ Premium Collection Configuration Node")
+        st.subheader(" strategic CSP Premium Deployment Engine")
         csp_base = df[df["RECOMMENDED ACTION"].str.contains("CASH-SECURED", na=False)].copy()
         if csp_base.empty:
-            st.info("No high-implied-volatility premium targets identified.")
+            st.info("No high-implied-volatility premium selling configurations available currently.")
         else:
             today = datetime.now()
             opt_min_date = (today + timedelta(days=30)).strftime("%b %d, %Y")
@@ -319,29 +279,24 @@ else:
             csp_base["🎯 INCOME Play Strike"] = (csp_base["Spot"] * 0.93).apply(lambda x: f"${round(x * 2) / 2:.2f}")
             csp_base["🛍️ DISCOUNT Play Strike"] = (csp_base["Spot"] * 0.88).apply(lambda x: f"${round(x * 2) / 2:.2f}")
             csp_base["Expirations Target"] = f"{opt_min_date} to {opt_max_date}"
-            final_view = csp_base[["Ticker", "Price", "Implied Vol (IV)", "Expirations Target", "🎯 INCOME Play Strike", "🛍️ DISCOUNT Play Strike"]]
+            final_view = csp_base[["Ticker", "Asset Class", "Price", "Implied Vol (IV)", "ATM Bid-Ask Spread", "Expirations Target", "🎯 INCOME Play Strike", "🛍️ DISCOUNT Play Strike"]]
             st.dataframe(final_view, use_container_width=True, hide_index=True)
 
     with tab3:
         st.subheader("🛰️ Market-Decoupled Alpha Matrix")
-        st.caption("Identifies tickers demonstrating positive technical setups during broad market downtrends.")
         active_candidates = df[df["RECOMMENDED ACTION"].str.contains("BUY|CASH-SECURED", na=False)]["Ticker"].unique().tolist()
         
         if not active_candidates:
-            st.info("No active watchlist candidates available to process for Alpha metrics.")
+            st.info("No active setups to process for decoupling profiles.")
         else:
             if st.button("🛰️ Process Rolling 3-Year Alpha Correlations"):
                 alpha_leads = []
                 with st.spinner("Processing alpha metrics via cached data layers..."):
                     try:
-                        # Fetch and cache index benchmark once
                         spy_h = yf.Ticker("SPY").history(period="3y")
-                        
                         for sym in active_candidates:
-                            # FIX BOTTLE-NECK: Rerouted to cached synchronized data layer
                             a_h = fetch_synchronized_macro_data(sym, horizon_years=3)
-                            if a_h.empty or len(a_h) < 200: 
-                                continue
+                            if a_h.empty or len(a_h) < 200: continue
                             
                             a_h['20_EMA'] = a_h['Close'].ewm(span=20, adjust=False).mean()
                             a_h['SPY_200_EMA'] = a_h['SPY_Close'].ewm(span=200, adjust=False).mean()
@@ -382,30 +337,29 @@ else:
                                     "Macro Bull Win Rate": f"{m_wr:.1f}%",
                                     "Divergent Bear Win Rate": f"{d_wr:.1f}%",
                                     "Alpha Score": f"+{(d_wr - 40.0):.1f}",
-                                    "Target Exploitation": play
+                                    "Target Play Formulation": play
                                 })
                         if alpha_leads:
-                            st.success(f"Isolated {len(alpha_leads)} idiosyncratic candidates.")
                             st.dataframe(pd.DataFrame(alpha_leads).sort_values(by="Alpha Score", ascending=False), use_container_width=True, hide_index=True)
                         else:
-                            st.info("No tickers exhibited significant historical decoupling criteria.")
+                            st.info("No assets met raw decoupling scoring boundaries currently.")
                     except Exception as ex:
-                        st.error(f"Alpha analysis processing exception: {ex}")
+                        st.error(f"Alpha execution processing breakdown: {ex}")
             
     with tab4:
         st.subheader("Master Active Ticker Board")
+        # RETAINED AUDITING: View live sources and metrics tracking
         active_df = df[df["RECOMMENDED ACTION"].str.contains("BUY|CASH-SECURED", na=False)]
-        st.dataframe(active_df, use_container_width=True, hide_index=True)
+        st.dataframe(active_df[["Ticker", "Asset Class", "Price", "vs 20-EMA", "Implied Vol (IV)", "ATM Bid-Ask Spread", "RECOMMENDED ACTION", "IV Data Quality"]], use_container_width=True, hide_index=True)
         
     with tab5:
-        st.subheader("Evaluated Watchlist Items Intentionally Restricted to Cash")
+        st.subheader("Evaluated Watchlist Items Restricted to Cash Preservation Mode")
         rejected_df = df[df["RECOMMENDED ACTION"].str.contains("STAY IN CASH", na=False)]
-        st.dataframe(rejected_df[["Ticker", "Price", "vs 20-EMA", "Implied Vol (IV)", "RECOMMENDED ACTION", "Reasoning Breakdown"]], use_container_width=True, hide_index=True)
+        st.dataframe(rejected_df[["Ticker", "Asset Class", "Price", "vs 20-EMA", "Implied Vol (IV)", "RECOMMENDED ACTION", "Reasoning Breakdown"]], use_container_width=True, hide_index=True)
 
     with tab6:
         st.subheader("🔮 Historical Equity Signal Simulation Engine")
-        # EXPLANATORY OVERSIGHT: User clarification regarding underlying return matrix calculations
-        st.info("💡 **Note on Performance Tracking:** Returns generated below reflect raw stock price performance metrics. True options strategy returns would scale relative to chosen leverage parameters, expiration dates, and delta allocations.")
+        st.info("💡 **Performance Metric Disclaimers:** Returns displayed below indicate raw underlying security valuations. Capital exposure returns scale directly alongside leverage parameters, contract delta ratios, and duration metrics chosen by execution desk operators.")
         
         bt_col1, bt_col2, bt_col3, bt_col4, bt_col5 = st.columns(5)
         bt_symbol = bt_col1.text_input("Ticker Symbol:", value="TSLA", key="bt_sym_input").upper().strip()
@@ -415,15 +369,14 @@ else:
         bt_stop = bt_col5.slider("Stop Loss (%)", min_value=1, max_value=15, value=5, key="bt_sl_slider") / 100
         
         if st.button("🔮 Compute Historical Performance Data", key="execute_bt_button"):
-            with st.spinner("Processing historical pricing loops..."):
+            with st.spinner("Processing pricing simulation arrays..."):
                 try:
                     combined_df = fetch_synchronized_macro_data(bt_symbol, horizon_years=bt_years)
                     if combined_df.empty:
-                        st.error("Historical lookup failed. Verify ticker validity or check exchange accessibility pipelines.")
+                        st.error("Historical lookup failed. Target data matrix empty.")
                     else:
                         combined_df['20_EMA'] = combined_df['Close'].ewm(span=20, adjust=False).mean()
                         combined_df['SPY_200_EMA'] = combined_df['SPY_Close'].ewm(span=200, adjust=False).mean()
-                        
                         combined_df['prev_close'] = combined_df['Close'].shift(1)
                         combined_df['prev_ema'] = combined_df['20_EMA'].shift(1)
                         
@@ -436,13 +389,11 @@ else:
                         sim_trades = []
                         
                         for sig_idx in signal_indices:
-                            if sig_idx < 200 or sig_idx >= len(combined_df) - 1:
-                                continue
+                            if sig_idx < 200 or sig_idx >= len(combined_df) - 1: continue
                             ent_date = combined_df.index[sig_idx]
                             ent_price = float(combined_df['Close'].iloc[sig_idx])
                             macro_bullish = combined_df['SPY_Close'].iloc[sig_idx] > combined_df['SPY_200_EMA'].iloc[sig_idx]
                             
-                            # FIX TERNARY BUG: Clean conditional assignment branching based on strategy profiles
                             if "BUY CALLS" in bt_strategy:
                                 trade_regime = "🟢 BULLISH MACRO" if macro_bullish else "⚠️ BEAR TRAP RISK"
                             else:
@@ -471,7 +422,7 @@ else:
                                 sim_trades.append({"Date": ent_date.strftime('%Y-%m-%d'), "Regime State": trade_regime, "Result": "TIMEOUT", "Underlying Return": f"{final_return*100:+.1f}% ⏳"})
                                 
                         if not sim_trades:
-                            st.info("No technical strategy trade triggers met current parameters over this historical horizon.")
+                            st.info("No strategy entry triggers matched parameters within designated lookback boundaries.")
                         else:
                             t_df = pd.DataFrame(sim_trades)
                             bull_setups = t_df[t_df['Regime State'].str.contains("BULLISH MACRO|BEARISH MACRO", na=False)]
@@ -485,4 +436,4 @@ else:
                             pb.metric("Win Rate: Market Divergent", f"{win_rate_trap:.1f}%")
                             st.dataframe(t_df, use_container_width=True, hide_index=True)
                 except Exception as e:
-                    st.error(f"Backtest runtime execution exception: {e}")
+                    st.error(f"Backtest processing exception: {e}")
