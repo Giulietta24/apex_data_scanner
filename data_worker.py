@@ -46,7 +46,8 @@ def process_universe_pool(ticker_list, is_etf, rsp_bullish):
             current_rsi = hist['RSI_14'].iloc[-1]
             
             is_bullish_trend = current_price > current_ema
-            volume_confirmed = current_vol > avg_vol
+            # Inside data_worker.py ticker loop
+            volume_confirmed = current_vol > (avg_vol * 0.85)
             trend_pct = ((current_price - current_ema) / current_ema) * 100
             
             # Options defaults
