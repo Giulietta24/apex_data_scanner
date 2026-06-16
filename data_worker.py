@@ -46,12 +46,14 @@ def process_universe_pool(ticker_list, is_etf, rsp_bullish):
             current_rsi = hist['RSI_14'].iloc[-1]
             
             is_bullish_trend = current_price > current_ema
-            # Inside data_worker.py ticker loop
+            
+            # DYNAMIC INTRA-DAY VOLUME ADJUSTMENT
             volume_confirmed = current_vol > (avg_vol * 0.85)
+            
             trend_pct = ((current_price - current_ema) / current_ema) * 100
             
             # Options defaults
-            iv = 25.0 if is_etf else 45.0  # Context-aware standard default baselines
+            iv = 25.0 if is_etf else 45.0  
             spread_pct = 0.50
             iv_source = "DEFAULT_BASE"
             
@@ -71,7 +73,7 @@ def process_universe_pool(ticker_list, is_etf, rsp_bullish):
                             iv = atm_call['impliedVolatility'] * 100
                             iv_source = "LIVE_CHAIN"
                             
-                        # DYNAMIC SPREAD CALCULATION: Replacing hardcoded 0.4% baseline
+                        # DYNAMIC SPREAD CALCULATION
                         bid = atm_call.get('bid')
                         ask = atm_call.get('ask')
                         if pd.notnull(bid) and pd.notnull(ask) and ask > 0:
@@ -80,8 +82,9 @@ def process_universe_pool(ticker_list, is_etf, rsp_bullish):
                 print(f"⚠️ {symbol} Options Chain Failure: {opt_err}. Engaging default risk framework.")
                 iv_source = "FALLBACK_PROTECTED"
 
-            # Execute cross-imported signal computation matrix
-            strategy, reason = evaluate_signal(is_bullish_trend, iv, volume_confirmed, current_rsi, rsp_bullish)
+            # Execute cross-imported signal computation matrix with explicit asset profiles
+            asset_profile = "ETF" if is_etf else "EQUITY"
+            strategy, reason = evaluate_signal(is_bullish_trend, iv, volume_confirmed, current_rsi, rsp_bullish, asset_class=asset_profile)
             
             results.append({
                 "Ticker": symbol,
@@ -92,7 +95,7 @@ def process_universe_pool(ticker_list, is_etf, rsp_bullish):
                 "Volume": f"{current_vol:,}",
                 "RECOMMENDED ACTION": strategy,
                 "Reasoning Breakdown": reason,
-                "Asset Class": "ETF" if is_etf else "EQUITY",
+                "Asset Class": asset_profile,
                 "IV Data Quality": iv_source
             })
             
